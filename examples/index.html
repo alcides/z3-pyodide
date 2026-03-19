@@ -91,9 +91,7 @@
                 return;
             }
 
-            // Step 2: Load Z3 WASM in a Web Worker
-            // Uses SharedArrayBuffer + Atomics for synchronous cross-thread
-            // communication — no JSPI/stack switching needed.
+            // Step 2: Load Z3 WASM in a Web Worker (async Promises, no JSPI needed)
             setStep('z3', 'active');
             try {
                 const z3Worker = new Worker('z3-worker.js');
@@ -107,28 +105,11 @@
                     z3Worker.postMessage({ kind: 'init' });
                 });
 
-                // Set up synchronous bridge via SharedArrayBuffer + Atomics
-                const sab = new SharedArrayBuffer(4);
-                const signal = new Int32Array(sab);
-                let resultStore = '';
-
-                z3Worker.onmessage = function(e) {
-                    if (e.data.kind === 'result') {
-                        resultStore = e.data.payload;
-                        Atomics.store(signal, 0, 1);
-                        Atomics.notify(signal, 0);
-                    }
-                };
-
-                // Synchronous eval: posts message, then blocks with Atomics.wait
-                // NOTE: Atomics.wait on main thread only works in Chrome with
-                // origin trial or in Workers. For the demo we use the async path.
+                // Async eval via Promises — no SharedArrayBuffer or JSPI needed
                 globalThis._z3_eval_async = function(commands) {
                     return new Promise((resolve) => {
-                        const handler = z3Worker.onmessage;
                         z3Worker.onmessage = function(e) {
                             if (e.data.kind === 'result') {
-                                z3Worker.onmessage = handler;
                                 resolve(e.data.payload);
                             }
                         };

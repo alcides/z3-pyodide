@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Local development server with COOP/COEP headers for SharedArrayBuffer.
+"""Local development server for the z3-pyodide example.
 
 Usage:
     python3 examples/server.py [port]
 
-This serves the examples/ directory with the Cross-Origin headers required
-for SharedArrayBuffer, which z3-solver WASM needs.
+Serves the examples/ directory. No special headers required —
+the demo uses async Promises, not SharedArrayBuffer.
 """
 
 import sys
@@ -14,12 +14,10 @@ from http.server import SimpleHTTPRequestHandler, HTTPServer
 from functools import partial
 
 
-class COOPCOEPHandler(SimpleHTTPRequestHandler):
-    """HTTP handler that adds Cross-Origin headers for SharedArrayBuffer."""
+class CORSHandler(SimpleHTTPRequestHandler):
+    """HTTP handler with CORS headers."""
 
     def end_headers(self):
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        self.send_header("Cross-Origin-Embedder-Policy", "require-corp")
         self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()
 
@@ -43,12 +41,11 @@ def main():
 
     # Serve from the examples/ directory
     serve_dir = os.path.dirname(os.path.abspath(__file__))
-    handler = partial(COOPCOEPHandler, directory=serve_dir)
+    handler = partial(CORSHandler, directory=serve_dir)
 
     server = HTTPServer(("0.0.0.0", port), handler)
     print(f"\n  z3-pyodide example server")
     print(f"  Serving {serve_dir}")
-    print(f"  COOP/COEP headers enabled (SharedArrayBuffer)")
     print(f"\n  Open: \033[36mhttp://0.0.0.0:{port}\033[0m\n")
 
     try:
