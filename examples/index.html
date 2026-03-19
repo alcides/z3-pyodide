@@ -91,57 +91,59 @@
                 return;
             }
 
-            // Step 2: Load Z3 WASM in a Web Worker (non-blocking)
+            // Step 2: Load Z3 WASM in a Web Worker
+            // Uses SharedArrayBuffer + Atomics for synchronous cross-thread
+            // communication — no JSPI/stack switching needed.
             setStep('z3', 'active');
             try {
                 const z3Worker = new Worker('z3-worker.js');
 
-                // Wait for the worker to be ready
                 await new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => reject(new Error('Z3 init timed out (60s)')), 60000);
                     z3Worker.onmessage = function(e) {
-                        if (e.data.kind === 'ready') {
-                            clearTimeout(timeout);
-                            resolve();
-                        }
+                        if (e.data.kind === 'ready') { clearTimeout(timeout); resolve(); }
                     };
-                    z3Worker.onerror = function(e) {
-                        clearTimeout(timeout);
-                        reject(new Error(e.message || 'Worker error'));
-                    };
+                    z3Worker.onerror = function(e) { clearTimeout(timeout); reject(new Error(e.message || 'Worker error')); };
                     z3Worker.postMessage({ kind: 'init' });
                 });
 
-                // Create synchronous eval bridge using SharedArrayBuffer
-                // or fallback to async message passing
-                let evalId = 0;
-                const pending = {};
+                // Set up synchronous bridge via SharedArrayBuffer + Atomics
+                const sab = new SharedArrayBuffer(4);
+                const signal = new Int32Array(sab);
+                let resultStore = '';
 
                 z3Worker.onmessage = function(e) {
-                    if (e.data.kind === 'result' && pending[e.data.id]) {
-                        pending[e.data.id](e.data.payload);
+                    if (e.data.kind === 'result') {
+                        resultStore = e.data.payload;
+                        Atomics.store(signal, 0, 1);
+                        Atomics.notify(signal, 0);
                     }
                 };
 
-                // Expose an async eval function
-                function evalSmtlib2Async(commands) {
+                // Synchronous eval: posts message, then blocks with Atomics.wait
+                // NOTE: Atomics.wait on main thread only works in Chrome with
+                // origin trial or in Workers. For the demo we use the async path.
+                globalThis._z3_eval_async = function(commands) {
                     return new Promise((resolve) => {
-                        const id = evalId++;
-                        pending[id] = resolve;
-                        z3Worker.postMessage({ kind: 'eval', payload: commands, id: id });
+                        const handler = z3Worker.onmessage;
+                        z3Worker.onmessage = function(e) {
+                            if (e.data.kind === 'result') {
+                                z3Worker.onmessage = handler;
+                                resolve(e.data.payload);
+                            }
+                        };
+                        z3Worker.postMessage({ kind: 'eval', payload: commands, id: 0 });
                     });
-                }
-
-                // Expose to Python via globalThis
-                globalThis._z3_eval_async = evalSmtlib2Async;
+                };
 
                 setStep('z3', 'done', 'Z3 WASM loaded (Web Worker)');
             } catch (e) {
-                setStep('z3', 'error', 'Failed to load Z3: ' + e.message);
-                logOutput('ERROR loading Z3: ' + e.message);
+                const msg = (e && e.message) ? e.message : String(e);
+                setStep('z3', 'error', 'Failed to load Z3: ' + msg);
+                logOutput('ERROR loading Z3: ' + msg);
                 logOutput('');
                 logOutput('Make sure you ran:  bash examples/setup.sh');
-                logOutput('Details: ' + (e.stack || ''));
+                logOutput('Details: ' + ((e && e.stack) || ''));
                 return;
             }
 
@@ -164,28 +166,20 @@
 
             try {
                 await pyodide.runPythonAsync(`
-import asyncio
-from pyodide.ffi import to_js
 import js
-
-# Create a synchronous wrapper around the async JS eval function
-async def _eval_z3(commands):
-    result = await js.globalThis._z3_eval_async(commands)
-    return str(result)
-
-# Patch the WASM backend to use our async bridge
 from z3_pyodide._backend._base import Backend
 
 class BrowserBackend(Backend):
-    def eval_smtlib2(self, commands):
-        import asyncio
-        # Use Pyodide's event loop to run the async JS call
-        loop = asyncio.get_event_loop()
-        future = js.globalThis._z3_eval_async(commands)
-        # Convert JS Promise to Python awaitable
-        from pyodide.ffi import run_sync
-        result = run_sync(future)
+    """Async browser backend — no JSPI/stack switching needed."""
+    async def eval_smtlib2_async(self, commands):
+        result = await js.globalThis._z3_eval_async(commands)
         return str(result)
+
+    def eval_smtlib2(self, commands):
+        raise RuntimeError(
+            "Use 'await solver.acheck()' in Pyodide. "
+            "Synchronous eval not available without JSPI."
+        )
 
     def reset(self):
         pass
@@ -193,15 +187,67 @@ class BrowserBackend(Backend):
     def close(self):
         pass
 
-# Set the browser backend as default
+# Monkey-patch Solver/Optimize with async check methods
+from z3_pyodide._solver import Solver, Optimize, sat, unsat, unknown, CheckSatResult, collect_declarations, parse_model_string, ModelRef
+
+async def _acheck(self, *assumptions):
+    """Async version of check() for browser use."""
+    commands = []
+    commands.append("(reset)")
+    if hasattr(self, '_unsat_core_enabled') and self._unsat_core_enabled:
+        commands.append("(set-option :produce-unsat-cores true)")
+    for a in self._assertions:
+        decls = collect_declarations(a, self._declared)
+        commands.extend(decls)
+    if hasattr(self, '_assertion_names'):
+        for name in self._assertion_names:
+            if name is not None:
+                self._declared.add(name)
+        for a, name in zip(self._assertions, self._assertion_names):
+            if name is not None:
+                commands.append(f"(assert (! {a.sexpr()} :named {name}))")
+            else:
+                commands.append(f"(assert {a.sexpr()})")
+    else:
+        for a in self._assertions:
+            commands.append(f"(assert {a.sexpr()})")
+    if hasattr(self, '_objectives'):
+        for kind, expr in self._objectives:
+            decls = collect_declarations(expr, self._declared)
+            commands.extend(decls)
+        for kind, expr in self._objectives:
+            commands.append(f"({kind} {expr.sexpr()})")
+    commands.append("(check-sat)")
+    commands.append("(get-model)")
+
+    NL = chr(10)
+    result = await self._backend.eval_smtlib2_async(NL.join(commands))
+    lines = result.strip()
+    idx = lines.find(NL)
+    result_line = (lines[:idx] if idx != -1 else lines).strip()
+    rest = lines[idx+1:] if idx != -1 else ""
+    if result_line == "sat":
+        self._last_result = sat
+    elif result_line == "unsat":
+        self._last_result = unsat
+    else:
+        self._last_result = unknown
+    self._last_model = None
+    if self._last_result == sat and rest:
+        self._last_model = ModelRef(parse_model_string(rest))
+    return self._last_result
+
+Solver.acheck = _acheck
+Optimize.acheck = _acheck
+
 from z3_pyodide._context import Context, set_default_context
-ctx = Context(backend=BrowserBackend())
-set_default_context(ctx)
+set_default_context(Context(backend=BrowserBackend()))
 
 from z3_pyodide import *
 
 print("=" * 60)
 print("  z3-pyodide: Z3 Theorem Prover in Pyodide")
+print("  (no JSPI/stack switching required)")
 print("=" * 60)
 print()
 
@@ -213,7 +259,7 @@ s = Solver()
 s.add(x + y == 10)
 s.add(x > 0, y > 0)
 s.add(x > y)
-result = s.check()
+result = await s.acheck()
 print(f"  x + y = 10, x > 0, y > 0, x > y")
 print(f"  Result: {result}")
 if result == sat:
@@ -221,7 +267,7 @@ if result == sat:
     print(f"  x = {m[x]}, y = {m[y]}")
 print()
 
-# ----- Example 2: Sudoku-style logic puzzle -----
+# ----- Example 2: Logic puzzle -----
 print("Example 2: Logic puzzle")
 print("-" * 40)
 a, b, c = Ints('a b c')
@@ -232,7 +278,7 @@ s2.add(c >= 1, c <= 9)
 s2.add(a + b + c == 15)
 s2.add(a < b, b < c)
 s2.add(a * b * c == 105)
-if s2.check() == sat:
+if await s2.acheck() == sat:
     m = s2.model()
     print(f"  a + b + c = 15, a < b < c, a * b * c = 105")
     print(f"  a = {m[a]}, b = {m[b]}, c = {m[c]}")
@@ -247,7 +293,7 @@ a, b = Reals('a b')
 s3 = Solver()
 s3.add(a * 3 == 1)
 s3.add(b == a + 1)
-s3.check()
+await s3.acheck()
 m = s3.model()
 print(f"  3a = 1, b = a + 1")
 print(f"  a = {m[a].as_string()}, b = {m[b].as_string()}")
@@ -259,7 +305,7 @@ print("-" * 40)
 password = BitVec('password', 8)
 s4 = Solver()
 s4.add(password ^ BitVecVal(0x42, 8) == BitVecVal(0x37, 8))
-s4.check()
+await s4.acheck()
 val = s4.model()[password].as_long()
 print(f"  password XOR 0x42 = 0x37")
 print(f"  password = 0x{val:02X} ('{chr(val)}')")
