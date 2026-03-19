@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>z3-pyodide Hello World</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #1a1a2e;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem;
+        }
+        h1 { color: #00d4ff; margin-bottom: 0.5rem; font-size: 1.8rem; }
+        .subtitle { color: #888; margin-bottom: 2rem; font-size: 0.95rem; }
+        .container { width: 100%; max-width: 800px; }
+        #status {
+            background: #16213e; border: 1px solid #0f3460;
+            border-radius: 8px; padding: 1rem 1.5rem;
+            margin-bottom: 1.5rem; font-size: 0.9rem;
+        }
+        #status .step { padding: 0.25rem 0; color: #666; }
+        #status .step.done { color: #4ecca3; }
+        #status .step.active { color: #ffd93d; }
+        #status .step.error { color: #ff6b6b; }
+        #output {
+            background: #0d1117; border: 1px solid #30363d;
+            border-radius: 8px; padding: 1.5rem;
+            font-family: 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+            font-size: 0.85rem; line-height: 1.6;
+            white-space: pre-wrap; min-height: 400px; overflow-y: auto;
+        }
+        .output-label {
+            color: #888; font-size: 0.8rem; margin-bottom: 0.5rem;
+            text-transform: uppercase; letter-spacing: 0.1em;
+        }
+    </style>
+</head>
+<body>
+    <h1>z3-pyodide</h1>
+    <p class="subtitle">Z3 Theorem Prover running in Python, in the browser</p>
+
+    <div class="container">
+        <div id="status">
+            <div class="step" id="step-pyodide">Loading Pyodide...</div>
+            <div class="step" id="step-z3">Loading Z3 WASM (~17 MB)...</div>
+            <div class="step" id="step-pkg">Installing z3_pyodide...</div>
+            <div class="step" id="step-run">Running examples...</div>
+        </div>
+        <div class="output-label">Output</div>
+        <div id="output">Initializing...</div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"
+            crossorigin="anonymous"></script>
+    <script>
+        const outputEl = document.getElementById('output');
+        const steps = {
+            pyodide: document.getElementById('step-pyodide'),
+            z3: document.getElementById('step-z3'),
+            pkg: document.getElementById('step-pkg'),
+            run: document.getElementById('step-run'),
+        };
+
+        function setStep(key, state, text) {
+            steps[key].className = 'step ' + state;
+            if (text) steps[key].textContent = text;
+        }
+
+        function logOutput(msg) {
+            outputEl.textContent += msg + '\n';
+        }
+
+        async function main() {
+            outputEl.textContent = '';
+
+            // Step 1: Load Pyodide
+            setStep('pyodide', 'active');
+            let pyodide;
+            try {
+                pyodide = await loadPyodide();
+                setStep('pyodide', 'done', 'Pyodide loaded');
+            } catch (e) {
+                setStep('pyodide', 'error', 'Failed to load Pyodide: ' + e.message);
+                logOutput('ERROR: ' + e.message);
+                return;
+            }
+
+            // Step 2: Load Z3 WASM in a Web Worker (non-blocking)
+            setStep('z3', 'active');
+            try {
+                const z3Worker = new Worker('z3-worker.js');
+
+                // Wait for the worker to be ready
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error('Z3 init timed out (60s)')), 60000);
+                    z3Worker.onmessage = function(e) {
+                        if (e.data.kind === 'ready') {
+                            clearTimeout(timeout);
+                            resolve();
+                        }
+                    };
+                    z3Worker.onerror = function(e) {
+                        clearTimeout(timeout);
+                        reject(new Error(e.message || 'Worker error'));
+                    };
+                    z3Worker.postMessage({ kind: 'init' });
+                });
+
+                // Create synchronous eval bridge using SharedArrayBuffer
+                // or fallback to async message passing
+                let evalId = 0;
+                const pending = {};
+
+                z3Worker.onmessage = function(e) {
+                    if (e.data.kind === 'result' && pending[e.data.id]) {
+                        pending[e.data.id](e.data.payload);
+                    }
+                };
+
+                // Expose an async eval function
+                function evalSmtlib2Async(commands) {
+                    return new Promise((resolve) => {
+                        const id = evalId++;
+                        pending[id] = resolve;
+                        z3Worker.postMessage({ kind: 'eval', payload: commands, id: id });
+                    });
+                }
+
+                // Expose to Python via globalThis
+                globalThis._z3_eval_async = evalSmtlib2Async;
+
+                setStep('z3', 'done', 'Z3 WASM loaded (Web Worker)');
+            } catch (e) {
+                setStep('z3', 'error', 'Failed to load Z3: ' + e.message);
+                logOutput('ERROR loading Z3: ' + e.message);
+                logOutput('');
+                logOutput('Make sure you ran:  bash examples/setup.sh');
+                logOutput('Details: ' + (e.stack || ''));
+                return;
+            }
+
+            // Step 3: Install z3_pyodide
+            setStep('pkg', 'active');
+            try {
+                await pyodide.loadPackage('micropip');
+                const micropip = pyodide.pyimport('micropip');
+                await micropip.install('./z3_pyodide-0.1.0-py3-none-any.whl');
+                setStep('pkg', 'done', 'z3_pyodide installed');
+            } catch (e) {
+                setStep('pkg', 'error', 'Failed to install z3_pyodide: ' + e.message);
+                logOutput('ERROR: ' + e.message);
+                return;
+            }
+
+            // Step 4: Run examples
+            setStep('run', 'active');
+            pyodide.setStdout({ batched: (msg) => logOutput(msg) });
+
+            try {
+                await pyodide.runPythonAsync(`
+import asyncio
+from pyodide.ffi import to_js
+import js
+
+# Create a synchronous wrapper around the async JS eval function
+async def _eval_z3(commands):
+    result = await js.globalThis._z3_eval_async(commands)
+    return str(result)
+
+# Patch the WASM backend to use our async bridge
+from z3_pyodide._backend._base import Backend
+
+class BrowserBackend(Backend):
+    def eval_smtlib2(self, commands):
+        import asyncio
+        # Use Pyodide's event loop to run the async JS call
+        loop = asyncio.get_event_loop()
+        future = js.globalThis._z3_eval_async(commands)
+        # Convert JS Promise to Python awaitable
+        from pyodide.ffi import run_sync
+        result = run_sync(future)
+        return str(result)
+
+    def reset(self):
+        pass
+
+    def close(self):
+        pass
+
+# Set the browser backend as default
+from z3_pyodide._context import Context, set_default_context
+ctx = Context(backend=BrowserBackend())
+set_default_context(ctx)
+
+from z3_pyodide import *
+
+print("=" * 60)
+print("  z3-pyodide: Z3 Theorem Prover in Pyodide")
+print("=" * 60)
+print()
+
+# ----- Example 1: Basic integer constraints -----
+print("Example 1: Basic integer constraints")
+print("-" * 40)
+x, y = Ints('x y')
+s = Solver()
+s.add(x + y == 10)
+s.add(x > 0, y > 0)
+s.add(x > y)
+result = s.check()
+print(f"  x + y = 10, x > 0, y > 0, x > y")
+print(f"  Result: {result}")
+if result == sat:
+    m = s.model()
+    print(f"  x = {m[x]}, y = {m[y]}")
+print()
+
+# ----- Example 2: Sudoku-style logic puzzle -----
+print("Example 2: Logic puzzle")
+print("-" * 40)
+a, b, c = Ints('a b c')
+s2 = Solver()
+s2.add(a >= 1, a <= 9)
+s2.add(b >= 1, b <= 9)
+s2.add(c >= 1, c <= 9)
+s2.add(a + b + c == 15)
+s2.add(a < b, b < c)
+s2.add(a * b * c == 105)
+if s2.check() == sat:
+    m = s2.model()
+    print(f"  a + b + c = 15, a < b < c, a * b * c = 105")
+    print(f"  a = {m[a]}, b = {m[b]}, c = {m[c]}")
+else:
+    print("  No solution")
+print()
+
+# ----- Example 3: Real arithmetic -----
+print("Example 3: Real arithmetic")
+print("-" * 40)
+a, b = Reals('a b')
+s3 = Solver()
+s3.add(a * 3 == 1)
+s3.add(b == a + 1)
+s3.check()
+m = s3.model()
+print(f"  3a = 1, b = a + 1")
+print(f"  a = {m[a].as_string()}, b = {m[b].as_string()}")
+print()
+
+# ----- Example 4: BitVector puzzle -----
+print("Example 4: BitVector puzzle")
+print("-" * 40)
+password = BitVec('password', 8)
+s4 = Solver()
+s4.add(password ^ BitVecVal(0x42, 8) == BitVecVal(0x37, 8))
+s4.check()
+val = s4.model()[password].as_long()
+print(f"  password XOR 0x42 = 0x37")
+print(f"  password = 0x{val:02X} ('{chr(val)}')")
+print()
+
+print("=" * 60)
+print("  All examples completed successfully!")
+print("=" * 60)
+`);
+                setStep('run', 'done', 'Examples complete!');
+            } catch (e) {
+                setStep('run', 'error', 'Error running examples: ' + e.message);
+                logOutput('ERROR: ' + e.message);
+                logOutput(e.stack || '');
+            }
+        }
+
+        main();
+    </script>
+</body>
+</html>

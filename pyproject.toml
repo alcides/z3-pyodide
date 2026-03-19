@@ -1,0 +1,15 @@
+[project]
+name = "z3-pyodide"
+version = "0.1.0"
+description = "z3-py compatible API for Pyodide (browser) via SMT-LIB2 text protocol"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest", "z3-solver"]
+dev = ["pytest", "z3-solver", "mypy", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
