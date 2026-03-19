@@ -5,6 +5,24 @@ description = "z3-py compatible API for Pyodide (browser) via SMT-LIB2 text prot
 requires-python = ">=3.10"
 license = "MIT"
 dependencies = []
+readme = "README.md"
+authors = [
+    { name = "Alcides Fonseca", email = "me@alcidesfonseca.com" },
+]
+keywords = ["z3", "smt", "solver", "pyodide", "wasm", "theorem-prover"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/alcides/z3py-wasm"
+Demo = "https://alcides.github.io/z3py-wasm/"
+Issues = "https://github.com/alcides/z3py-wasm/issues"
 
 [project.optional-dependencies]
 test = ["pytest", "z3-solver"]
