@@ -20,9 +20,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/alcides/z3py-wasm"
+Homepage = "https://github.com/alcides/z3-pyodide"
 Demo = "https://alcides.github.io/z3py-wasm/"
-Issues = "https://github.com/alcides/z3py-wasm/issues"
+Issues = "https://github.com/alcides/z3-pyodide/issues"
 
 [project.optional-dependencies]
 test = ["pytest", "z3-solver"]

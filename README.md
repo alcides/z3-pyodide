@@ -1,8 +1,8 @@
-# z3py-wasm
+# z3-pyodide
 
 A pure-Python Z3 theorem prover package that works in the browser via [Pyodide](https://pyodide.org/). Provides a **z3-py compatible API** using the SMT-LIB2 text protocol, communicating with Z3 compiled to WebAssembly.
 
-**[Live Demo](https://alcides.github.io/z3py-wasm/)**
+**[Live Demo](https://alcides.github.io/z3-pyodide/)**
 
 ## Quick Example
 
